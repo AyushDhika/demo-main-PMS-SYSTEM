@@ -232,4 +232,101 @@ with st.sidebar:
     st.header("1. Master Setup")
     
     if st.session_state.master_api:
-        st.success("Master Connected 
+        st.success("Master Connected")  # Fixed potential string issue
+        if st.button("Disconnect Master"):
+            st.session_state.master_api = None
+            st.session_state.master_info = {"name": "Not Connected", "balance": 0.0, "client_id": ""}
+            st.session_state.copier_running = False
+            st.rerun()
+    else:
+        with st.form("m_login"):
+            mk = st.text_input("API Key")
+            mi = st.text_input("Client ID")
+            mp = st.text_input("Password", type="password")
+            mt = st.text_input("TOTP Secret", type="password")
+            if st.form_submit_button("CONNECT MASTER"):
+                api, info, msg = connect_angel_master(mk, mi, mp, mt)
+                if api:
+                    st.session_state.master_api = api
+                    st.session_state.master_info = info
+                    # Sync Old Orders to avoid duplicates
+                    try:
+                        ob = api.orderBook()
+                        if ob and 'data' in ob:
+                            for o in ob['data']:
+                                if o['orderstatus'] == 'complete':
+                                    st.session_state.processed_orders.add(o['orderid'])
+                    except: pass
+                    st.success("Connected!")
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    st.markdown("---")
+    st.header("2. Add Slave")
+    with st.form("s_login"):
+        sn = st.text_input("Name")
+        sk = st.text_input("API Key")
+        si = st.text_input("Client ID")
+        sp = st.text_input("Password", type="password")
+        stot = st.text_input("TOTP Secret", type="password")
+        sm = st.number_input("Multiplier", value=1.0, step=0.5)
+        
+        if st.form_submit_button("ADD SLAVE"):
+            api, msg = connect_angel_slave(sk, si, sp, stot)
+            if api:
+                st.session_state.slaves.append({
+                    "name": sn, "client_id": si, "api": api, "multiplier": sm
+                })
+                st.success(f"Added {sn}")
+            else:
+                st.error(msg)
+
+# --- DASHBOARD METRICS ---
+info = st.session_state.master_info
+is_conn = st.session_state.master_api is not None
+run_state = "RUNNING" if st.session_state.copier_running else "STOPPED"
+run_color = "#00ff88" if st.session_state.copier_running else "#ff0066"
+
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    st.markdown(f"""<div class="metric-box"><div class="metric-label">Master Status</div>
+    <div class="metric-value {'success-text' if is_conn else 'error-text'}">{'ONLINE' if is_conn else 'OFFLINE'}</div></div>""", unsafe_allow_html=True)
+with m2:
+    st.markdown(f"""<div class="metric-box"><div class="metric-label">Master Balance</div>
+    <div class="metric-value">₹ {info['balance']:,.2f}</div></div>""", unsafe_allow_html=True)
+with m3:
+    st.markdown(f"""<div class="metric-box"><div class="metric-label">Active Slaves</div>
+    <div class="metric-value">{len(st.session_state.slaves)}</div></div>""", unsafe_allow_html=True)
+with m4:
+    st.markdown(f"""<div class="metric-box"><div class="metric-label">Copier Engine</div>
+    <div class="metric-value" style="color:{run_color}">{run_state}</div></div>""", unsafe_allow_html=True)
+
+# --- CONTROLS & LOGS ---
+c1, c2 = st.columns([1, 2])
+
+with c1:
+    st.subheader("🎮 Control Center")
+    if st.button("🚀 START / STOP ENGINE", type="primary", use_container_width=True):
+        toggle_engine()
+        st.rerun()
+
+    st.markdown("### 👥 Slave Accounts")
+    if st.session_state.slaves:
+        for i, s in enumerate(st.session_state.slaves):
+            with st.expander(f"{s['name']} ({s['multiplier']}x)"):
+                st.write(f"ID: {s['client_id']}")
+                if st.button("Remove", key=f"del_{i}"):
+                    st.session_state.slaves.pop(i)
+                    st.rerun()
+    else:
+        st.info("No slaves connected.")
+
+with c2:
+    st.subheader("📜 Live Execution Log")
+    log_cont = st.container(height=400, border=True)
+    for log in st.session_state.logs:
+        log_cont.markdown(log, unsafe_allow_html=True)
+    
+    if st.button("Refresh Logs"):
+        st.rerun()
