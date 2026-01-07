@@ -1,5 +1,4 @@
 import streamlit as st
-import pandas as pd
 import threading
 import time
 from SmartApi import SmartConnect
@@ -7,7 +6,7 @@ import pyotp
 from datetime import datetime
 
 # ----------------- 1. APP CONFIGURATION -----------------
-st.set_page_config(page_title="Trade Nexus Pro", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Trade Nexus Ultimate", layout="wide", page_icon="⚡")
 
 # --- CREDENTIALS ---
 APP_USERNAME = "admin"
@@ -49,20 +48,25 @@ st.markdown(f"""
         border-radius: 10px;
         border-left: 4px solid {COLOR_ACCENT};
         box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        margin-bottom: 10px;
     }}
     .metric-value {{ font-size: 24px; font-weight: bold; color: white; }}
     .metric-label {{ font-size: 14px; color: #8899a6; }}
     .success-text {{ color: #00ff88; font-weight: bold; }}
     .error-text {{ color: #ff0066; font-weight: bold; }}
+    .stButton>button {{
+        font-weight: bold;
+        border-radius: 5px;
+    }}
     </style>
 """, unsafe_allow_html=True)
 
-# ----------------- 3. LOGIN SYSTEM (Fixed) -----------------
+# ----------------- 3. LOGIN SYSTEM -----------------
 def login_screen():
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown("<br><br><br>", unsafe_allow_html=True)
-        st.markdown(f"<h1 style='text-align:center; color:{COLOR_ACCENT};'>⚡ PORTFOLIO NEXUS LOGIN</h1>", unsafe_allow_html=True)
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown(f"<h1 style='text-align:center; color:{COLOR_ACCENT};'>⚡ PORTFOLIO NEXUS ULTIMATE</h1>", unsafe_allow_html=True)
         
         with st.form("login_form"):
             user = st.text_input("Username")
@@ -78,52 +82,39 @@ def login_screen():
 
 if not st.session_state.logged_in:
     login_screen()
-    st.stop()  # Stop here if not logged in
+    st.stop()
 
-# ----------------- 4. ANGEL ONE CONNECTION LOGIC -----------------
+# ----------------- 4. CONNECTION LOGIC -----------------
 def connect_angel_master(api_key, client_id, password, totp_secret):
     try:
         obj = SmartConnect(api_key=api_key)
-        
-        # 1. Generate TOTP
         try:
             totp = pyotp.TOTP(totp_secret).now()
-        except Exception:
-            return None, None, "Invalid TOTP Secret (Ensure it's the alphanumeric code)"
+        except:
+            return None, None, "Invalid TOTP Secret (Use alphanumeric code)"
             
-        # 2. Generate Session
         data = obj.generateSession(client_id, password, totp)
         
         if data['status']:
-            # 3. Fetch Profile & Funds to Verify
+            # Verify Profile & Funds
             try:
-                # Fetch Funds
                 rms = obj.rmsLimit()
-                funds = "0.00"
-                if rms and 'data' in rms:
-                    # Logic to find net available funds
-                    funds = rms['data'].get('net', 0)
+                funds = float(rms['data']['net']) if rms and 'data' in rms else 0.0
                 
-                # Fetch Profile Name
                 profile = obj.getProfile(data['data']['refreshToken'])
                 name = profile['data']['name'] if profile and 'data' in profile else client_id
                 
-                info = {
-                    "name": name,
-                    "balance": float(funds),
-                    "client_id": client_id
-                }
+                info = {"name": name, "balance": funds, "client_id": client_id}
                 return obj, info, "Success"
-            except Exception as e:
-                return obj, {"name": client_id, "balance": 0.0}, "Connected, but failed to fetch funds."
+            except:
+                # Fallback if profile fetch fails but login worked
+                return obj, {"name": client_id, "balance": 0.0, "client_id": client_id}, "Success (Data Fetch Partial)"
         else:
             return None, None, data['message']
-            
     except Exception as e:
         return None, None, str(e)
 
 def connect_angel_slave(api_key, client_id, password, totp_secret):
-    # Simpler connection for slaves (we don't strictly need balance to trade, but good to check login)
     try:
         obj = SmartConnect(api_key=api_key)
         totp = pyotp.TOTP(totp_secret).now()
@@ -135,29 +126,41 @@ def connect_angel_slave(api_key, client_id, password, totp_secret):
     except Exception as e:
         return None, str(e)
 
-# ----------------- 5. BACKGROUND COPIER LOGIC -----------------
+# ----------------- 5. HIGH-SPEED ENGINE (MULTITHREADED) -----------------
 def log_msg(msg, type="info"):
     ts = datetime.now().strftime("%H:%M:%S")
     color = "white"
-    if type == "trade": color = "#00ff88" # Green
-    if type == "error": color = "#ff0066" # Red
+    if type == "trade": color = "#00ff88"
+    if type == "error": color = "#ff0066"
     st.session_state.logs.insert(0, f"<span style='color:{color}'>[{ts}] {msg}</span>")
 
+def place_slave_order_thread(slave, params):
+    """Worker function for threads"""
+    try:
+        slave['api'].placeOrder(params)
+        log_msg(f"✅ {slave['name']} Executed", "info")
+    except Exception as e:
+        log_msg(f"❌ {slave['name']} Failed: {e}", "error")
+
 def copier_engine():
+    """Main loop checking Master orders"""
     while st.session_state.copier_running:
         try:
             master = st.session_state.master_api
             if not master: break
             
-            # Fetch Order Book
-            orders = master.orderBook()
-            
+            # Fetch Master Order Book
+            try:
+                orders = master.orderBook()
+            except:
+                orders = None # Handle API glitches
+
             if orders and 'data' in orders:
                 for o in orders['data']:
-                    # CHECK: Status is Complete AND we haven't processed it yet
+                    # CHECK: Status is 'complete' AND we haven't processed this ID yet
                     if o['orderstatus'] == 'complete' and o['orderid'] not in st.session_state.processed_orders:
                         
-                        # New Trade Detected
+                        # --- 1. CAPTURE DETAILS ---
                         oid = o['orderid']
                         sym = o['tradingsymbol']
                         txn = o['transactiontype']
@@ -165,38 +168,43 @@ def copier_engine():
                         token = o['symboltoken']
                         exch = o['exchange']
                         
-                        log_msg(f"🔔 MASTER: {txn} {qty} {sym}", "trade")
+                        log_msg(f"🔔 MASTER SIGNAL: {txn} {qty} {sym}", "trade")
                         st.session_state.processed_orders.add(oid)
                         
-                        # Broadcast to Slaves
+                        # --- 2. MULTITHREADED EXECUTION (FAST) ---
+                        threads = []
                         for slave in st.session_state.slaves:
-                            try:
-                                slave_qty = int(qty * slave['multiplier'])
-                                params = {
-                                    "variety": "NORMAL",
-                                    "tradingsymbol": sym,
-                                    "symboltoken": token,
-                                    "transactiontype": txn,
-                                    "exchange": exch,
-                                    "ordertype": "MARKET",
-                                    "producttype": "INTRADAY",
-                                    "duration": "DAY",
-                                    "quantity": slave_qty
-                                }
-                                slave['api'].placeOrder(params)
-                                log_msg(f"✅ {slave['name']}: Sent {slave_qty} Qty", "info")
-                            except Exception as e:
-                                log_msg(f"❌ {slave['name']} Failed: {e}", "error")
+                            slave_qty = int(qty * slave['multiplier'])
+                            
+                            params = {
+                                "variety": "NORMAL",
+                                "tradingsymbol": sym,
+                                "symboltoken": token,
+                                "transactiontype": txn,
+                                "exchange": exch,
+                                "ordertype": "MARKET", # Market order for speed
+                                "producttype": "INTRADAY",
+                                "duration": "DAY",
+                                "quantity": slave_qty
+                            }
+                            
+                            # Launch Thread
+                            t = threading.Thread(target=place_slave_order_thread, args=(slave, params))
+                            threads.append(t)
+                            t.start()
+                        
+                        # Note: We do not join() threads here to allow the loop to continue instantly
                                 
         except Exception as e:
-            # Keep running even if internet flickers
-            pass
-        time.sleep(1.5)
+            pass # Keep engine alive despite network blips
+            
+        # Fast Polling Speed (0.5s)
+        time.sleep(0.5)
 
 def toggle_engine():
     if st.session_state.copier_running:
         st.session_state.copier_running = False
-        log_msg("🛑 Copier Stopped", "error")
+        log_msg("🛑 Engine Stopped", "error")
     else:
         if not st.session_state.master_api:
             st.error("Connect Master Account First!")
@@ -204,151 +212,24 @@ def toggle_engine():
             st.session_state.copier_running = True
             t = threading.Thread(target=copier_engine)
             t.start()
-            log_msg("🚀 Copier Started - Monitoring Master", "trade")
+            log_msg("🚀 Engine Started - High Speed Mode", "trade")
 
-# ----------------- 6. DASHBOARD UI -----------------
+# ----------------- 6. UI LAYOUT -----------------
 
 # Header
-col_h1, col_h2 = st.columns([3, 1])
-with col_h1:
-    st.markdown(f"<h1 style='color:{COLOR_ACCENT}'>🚀 PORTFOLIO NEXUS PRO</h1>", unsafe_allow_html=True)
-with col_h2:
+c_head, c_out = st.columns([4, 1])
+with c_head:
+    st.markdown(f"<h2 style='color:{COLOR_ACCENT}'>🚀 PORTFOLIO NEXUS ULTIMATE</h2>", unsafe_allow_html=True)
+with c_out:
     if st.button("LOGOUT"):
         st.session_state.logged_in = False
         st.rerun()
 
 st.divider()
 
-# --- CONNECTION PANEL (SIDEBAR) ---
+# --- SIDEBAR: CONNECTIONS ---
 with st.sidebar:
-    st.header("1. Master Account")
+    st.header("1. Master Setup")
     
-    # Logic: If already connected, hide the form inputs
     if st.session_state.master_api:
-        st.success("Master Connected ✅")
-        if st.button("Disconnect Master"):
-            st.session_state.master_api = None
-            st.session_state.master_info = {"name": "Not Connected", "balance": 0.0, "client_id": ""}
-            st.rerun()
-    else:
-        with st.form("master_login"):
-            m_key = st.text_input("API Key")
-            m_id = st.text_input("Client ID")
-            m_pass = st.text_input("Password", type="password")
-            m_totp = st.text_input("TOTP Secret", type="password")
-            
-            if st.form_submit_button("CONNECT MASTER"):
-                api, info, msg = connect_angel_master(m_key, m_id, m_pass, m_totp)
-                if api:
-                    st.session_state.master_api = api
-                    st.session_state.master_info = info
-                    # Sync existing orders
-                    try:
-                        obs = api.orderBook()
-                        if obs and 'data' in obs:
-                            for o in obs['data']:
-                                if o['orderstatus'] == 'complete':
-                                    st.session_state.processed_orders.add(o['orderid'])
-                    except: pass
-                    st.success("Connected!")
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-    st.markdown("---")
-    st.header("2. Slave Accounts")
-    
-    with st.form("slave_login"):
-        s_name = st.text_input("Slave Name")
-        s_key = st.text_input("API Key")
-        s_id = st.text_input("Client ID")
-        s_pass = st.text_input("Password", type="password")
-        s_totp = st.text_input("TOTP Secret", type="password")
-        s_mult = st.number_input("Multiplier", value=1.0)
-        
-        if st.form_submit_button("ADD SLAVE"):
-            api, msg = connect_angel_slave(s_key, s_id, s_pass, s_totp)
-            if api:
-                st.session_state.slaves.append({
-                    "name": s_name, 
-                    "client_id": s_id, 
-                    "api": api, 
-                    "multiplier": s_mult
-                })
-                st.success(f"Added {s_name}")
-            else:
-                st.error(msg)
-
-# --- MAIN METRICS ---
-m1, m2, m3, m4 = st.columns(4)
-
-info = st.session_state.master_info
-is_conn = st.session_state.master_api is not None
-
-with m1:
-    st.markdown(f"""
-    <div class="metric-box">
-        <div class="metric-label">Master Status</div>
-        <div class="metric-value {'success-text' if is_conn else 'error-text'}">
-            {'CONNECTED' if is_conn else 'DISCONNECTED'}
-        </div>
-        <div style="font-size:12px; color:#ccc;">{info['client_id']}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with m2:
-    st.markdown(f"""
-    <div class="metric-box">
-        <div class="metric-label">Master Account Name</div>
-        <div class="metric-value">{info['name']}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with m3:
-    st.markdown(f"""
-    <div class="metric-box">
-        <div class="metric-label">Available Funds</div>
-        <div class="metric-value">₹ {info['balance']:,.2f}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with m4:
-    run_state = "RUNNING" if st.session_state.copier_running else "STOPPED"
-    run_color = "#00ff88" if st.session_state.copier_running else "#ff0066"
-    st.markdown(f"""
-    <div class="metric-box">
-        <div class="metric-label">Copier Engine</div>
-        <div class="metric-value" style="color:{run_color}">{run_state}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# --- CONTROLS AND LOGS ---
-c1, c2 = st.columns([1, 2])
-
-with c1:
-    st.subheader("🎮 Actions")
-    
-    if st.button("🚀 START / STOP COPIER", type="primary", use_container_width=True):
-        toggle_engine()
-        st.rerun()
-        
-    st.markdown("### Connected Slaves")
-    if len(st.session_state.slaves) > 0:
-        for i, s in enumerate(st.session_state.slaves):
-            st.info(f"👤 {s['name']} ({s['multiplier']}x)")
-            if st.button(f"Remove", key=f"rm_{i}"):
-                st.session_state.slaves.pop(i)
-                st.rerun()
-    else:
-        st.caption("No slaves added yet.")
-
-with c2:
-    st.subheader("📜 Live Activity Log")
-    log_box = st.container(height=400, border=True)
-    for l in st.session_state.logs:
-        log_box.markdown(l, unsafe_allow_html=True)
-        
-    if st.button("Refresh Logs"):
-        st.rerun()
+        st.success("Master Connected 
