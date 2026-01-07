@@ -1,1 +1,3 @@
-pip install streamlit alpaca-trade-api pandas
+streamlit 
+alpaca-trade-api 
+pandas
