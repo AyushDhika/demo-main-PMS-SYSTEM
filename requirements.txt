@@ -1,3 +1,12 @@
 streamlit 
 alpaca-trade-api 
-pandas
+plotly
+pyotp
+streamlit-autorefresh
+smartapi-python
+websocket-client
+logzero
+streamlit-shadcn-ui
+yfinance
+openpyxl
+scipy
